@@ -22,6 +22,29 @@ TRUSTED_SITES = [
     "site:pubmed.ncbi.nlm.nih.gov", "site:webmd.com", "site:medlineplus.gov"
 ]
 
+from urllib.parse import urlparse
+
+def compute_trust_score(link, snippet):
+    domain = urlparse(link).netloc.lower()
+
+    # Base score by domain authority
+    if "nhs.uk" in domain or "cdc.gov" in domain or "who.int" in domain or "mayoclinic.org" in domain or "clevelandclinic.org" in domain:
+        score = 5
+    elif "gov" in domain or "edu" in domain or "health.harvard.edu" in domain:
+        score = 4.5
+    elif "webmd.com" in domain or "medlineplus.gov" in domain:
+        score = 4
+    elif "pubmed" in domain:
+        score = 3.5
+    else:
+        score = 3
+
+    # Bonus if a year or recent date appears in snippet
+    if any(year in snippet for year in ["2024", "2023", "2022"]):
+        score += 0.5
+
+    return min(score, 5.0)
+
 # === Google Search Function ===
 def get_medical_snippets(query, num_results=5):
     domain_query = " OR ".join(TRUSTED_SITES)
@@ -32,9 +55,16 @@ def get_medical_snippets(query, num_results=5):
         response.raise_for_status()
         items = response.json().get("items", [])
         items.sort(key=lambda x: 0 if "nhs.uk" in x.get("link", "") else 1)
-        return [(item["title"], item["link"], item["snippet"]) for item in items]
+
+        results = []
+        for item in items:
+            title, link, snippet = item["title"], item["link"], item["snippet"]
+            score = compute_trust_score(link, snippet)
+            results.append((title, link, snippet, score))
+        return results
     except Exception:
         return []
+
 
 # === ChatGPT Answering Function ===
 def answer_medical_question(question):
@@ -127,9 +157,11 @@ with tab1:
                 st.warning(advisory)
 
         if sources:
-            st.markdown("### 📚 Sources")
-            for title, link in sources:
-                st.markdown(f"- [{title}]({link})")
+    st.markdown("### 📚 Sources with Trust Scores")
+    for title, link, snippet, score in get_medical_snippets(full_query):
+        stars = "⭐" * int(score)
+        st.markdown(f"- [{title}]({link})  ({stars})\n\n> {snippet}")
+
 
         st.session_state.history.append({
             "Question": question, "Answer": answer, "Sources": sources, "Severity": severity
