@@ -4,6 +4,7 @@ import pandas as pd
 import gspread
 from openai import OpenAI
 from google.oauth2.service_account import Credentials
+from urllib.parse import urlparse
 
 # === 🔐 Load from secrets ===
 GOOGLE_API_KEY = st.secrets["google"]["api_key"]
@@ -22,12 +23,10 @@ TRUSTED_SITES = [
     "site:pubmed.ncbi.nlm.nih.gov", "site:webmd.com", "site:medlineplus.gov"
 ]
 
-from urllib.parse import urlparse
-
+# === Trust Score Function ===
 def compute_trust_score(link, snippet):
     domain = urlparse(link).netloc.lower()
 
-    # Base score by domain authority
     if "nhs.uk" in domain or "cdc.gov" in domain or "who.int" in domain or "mayoclinic.org" in domain or "clevelandclinic.org" in domain:
         score = 5
     elif "gov" in domain or "edu" in domain or "health.harvard.edu" in domain:
@@ -39,13 +38,12 @@ def compute_trust_score(link, snippet):
     else:
         score = 3
 
-    # Bonus if a year or recent date appears in snippet
     if any(year in snippet for year in ["2024", "2023", "2022"]):
         score += 0.5
 
     return min(score, 5.0)
 
-# === Google Search Function ===
+# === Google Search ===
 def get_medical_snippets(query, num_results=5):
     domain_query = " OR ".join(TRUSTED_SITES)
     full_query = f"{query} ({domain_query})"
@@ -58,21 +56,24 @@ def get_medical_snippets(query, num_results=5):
 
         results = []
         for item in items:
-            title, link, snippet = item["title"], item["link"], item["snippet"]
+            title = item["title"]
+            link = item["link"]
+            snippet = item["snippet"]
             score = compute_trust_score(link, snippet)
             results.append((title, link, snippet, score))
         return results
     except Exception:
         return []
 
-
-# === ChatGPT Answering Function ===
+# === ChatGPT Answering ===
 def answer_medical_question(question):
     snippets = get_medical_snippets(question)
     if not snippets:
         return "Sorry, no reliable sources available now.", []
-    context = "\n".join(f"- **{title}**: {snippet}" for title, link, snippet in snippets)
-    sources = [(title, link) for title, link, snippet in snippets]
+
+    context = "\n".join(f"- **{title}**: {snippet}" for title, link, snippet, score in snippets)
+    sources = [(title, link, snippet, score) for title, link, snippet, score in snippets]
+
     prompt = f"""
 Answer clearly using snippets below.
 Mention both common and serious conditions if symptoms provided.
@@ -95,34 +96,34 @@ Answer:
     except Exception as e:
         return f"OpenAI API Error: {e}", []
 
-# === Expanded Proactive Risk Advisories ===
+# === Proactive Advisories ===
 RISK_SNIPPETS = {
-    "antibiotics": "Misuse of antibiotics can cause antibiotic resistance.",
-    "vaccines": "Vaccines do not cause autism; extensive research confirms safety.",
-    "ibuprofen": "Long-term/high-dose ibuprofen may harm kidneys or cause stomach bleeding.",
-    "detox": "Your body naturally detoxifies; external detox methods may be harmful.",
-    "fatigue": "Persistent fatigue might indicate underlying health issues.",
-    "vision loss": "Sudden vision loss is a medical emergency—seek immediate help.",
-    "headache": "Sudden severe headache could signal stroke or aneurysm—seek immediate care.",
-    "chest pain": "Chest pain may indicate a heart attack—seek immediate medical help.",
-    "rash": "Rashes with fever or breathing issues may be serious—seek urgent care."
+    "antibiotics": "Misuse of antibiotics can lead to antibiotic resistance.",
+    "vaccines": "Vaccines do not cause autism; they are safe and thoroughly tested.",
+    "ibuprofen": "Long-term use of ibuprofen may cause kidney or stomach problems.",
+    "detox": "Your body detoxifies naturally; detox teas or regimens are often unnecessary and risky.",
+    "fatigue": "Persistent fatigue might signal anemia, thyroid issues, or depression.",
+    "vision loss": "Sudden vision loss is a medical emergency. Seek immediate care.",
+    "headache": "Sudden severe headache could mean stroke. Don’t delay medical help.",
+    "chest pain": "Chest pain might indicate a heart attack. Go to the ER immediately.",
+    "rash": "If rash is accompanied by fever or trouble breathing, see a doctor quickly."
 }
 
 def get_risk_snippets(query):
     return [snippet for keyword, snippet in RISK_SNIPPETS.items() if keyword in query.lower()]
 
-# === Severity Indicators ===
+# === Severity Categorization ===
 SEVERITY_KEYWORDS = {
-    "🔴 Immediate": ["chest pain", "vision loss", "stroke", "aneurysm", "sudden severe headache"],
-    "🟠 Urgent": ["high fever", "severe pain", "persistent vomiting", "unusual rash", "dizziness"],
+    "🔴 Immediate": ["chest pain", "vision loss", "stroke", "aneurysm", "severe headache"],
+    "🟠 Urgent": ["high fever", "severe pain", "vomiting", "sudden dizziness"],
     "🟢 Routine": []
 }
 
 def classify_severity(query):
-    q_lower = query.lower()
-    for severity, keywords in SEVERITY_KEYWORDS.items():
-        if any(keyword in q_lower for keyword in keywords):
-            return severity
+    q = query.lower()
+    for level, words in SEVERITY_KEYWORDS.items():
+        if any(w in q for w in words):
+            return level
     return "🟢 Routine"
 
 # === Streamlit UI ===
@@ -153,22 +154,24 @@ with tab1:
 
         if risk_advisories:
             st.markdown("### ⚠️ Proactive Health Advisory")
-            for advisory in risk_advisories:
-                st.warning(advisory)
+            for adv in risk_advisories:
+                st.warning(adv)
 
         if sources:
-    st.markdown("### 📚 Sources with Trust Scores")
-    for title, link, snippet, score in get_medical_snippets(full_query):
-        stars = "⭐" * int(score)
-        st.markdown(f"- [{title}]({link})  ({stars})\n\n> {snippet}")
-
+            st.markdown("### 📚 Sources with Trust Scores")
+            for title, link, snippet, score in sources:
+                stars = "⭐" * int(score)
+                st.markdown(f"- [{title}]({link}) ({stars})\n\n> {snippet}")
 
         st.session_state.history.append({
-            "Question": question, "Answer": answer, "Sources": sources, "Severity": severity
+            "Question": question,
+            "Answer": answer,
+            "Sources": sources,
+            "Severity": severity
         })
 
 with tab2:
-    st.markdown("### 📜 Session History")
+    st.markdown("### 📜 Your Session History")
     if not st.session_state.history:
         st.info("No questions asked yet.")
     else:
@@ -177,7 +180,7 @@ with tab2:
             st.write(entry['Answer'])
             st.markdown("---")
 
-# === Feedback Form (restored) ===
+# === Feedback Form ===
 st.markdown("---")
 st.markdown("### 💬 Leave Feedback")
 
@@ -190,7 +193,7 @@ feedback_sheet = gc.open(GOOGLE_SHEET_NAME).sheet1
 
 with st.form("feedback_form"):
     st.markdown("*(Optional)* Rate your experience and provide feedback.")
-    rating = st.radio("Rate your experience:", ["⭐", "⭐⭐", "⭐⭐⭐", "⭐⭐⭐⭐", "⭐⭐⭐⭐⭐"], index=4, horizontal=True)
+    rating = st.radio("How would you rate your experience?", ["⭐", "⭐⭐", "⭐⭐⭐", "⭐⭐⭐⭐", "⭐⭐⭐⭐⭐"], index=4, horizontal=True)
     comments = st.text_area("Your Feedback")
     if st.form_submit_button("Submit Feedback"):
         feedback_sheet.append_row([rating, comments])
